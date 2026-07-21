@@ -168,7 +168,7 @@ jobs:
         run: dotnet publish ${{ env.WEBAPP_PROJECT }} -c Release --no-restore -o ${{ github.workspace }}/artifacts/webapp
 
       - name: Download validated infra artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: infra-validated-${{ github.run_id }}
           path: ${{ github.workspace }}/artifacts/infra-validated
