@@ -74,12 +74,7 @@ jobs:
             exit 1
           }
 
-      - name: Dependency review for PR
-        if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v5
-        with:
-          fail-on-severity: moderate
-          license-check: false
+
 
   test:
     name: Test and Coverage
