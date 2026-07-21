@@ -19,7 +19,8 @@ env:
   CI_WORKFLOW_FILE: ci-validate-package.yml
   WEBAPP_ARTIFACT_PREFIX: webapp-deployable-
   AZURE_WEBAPP_NAME: space-todo
-  AZURE_WEBAPP_SLOT: Production
+  AZURE_STAGING_SLOT: staging
+  AZURE_PRODUCTION_SLOT: production
 
 jobs:
   deploy:
@@ -109,5 +110,57 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          slot-name: ${{ env.AZURE_WEBAPP_SLOT }}
+          slot-name: ${{ env.AZURE_STAGING_SLOT }}
           package: ${{ github.workspace }}/ci-artifact/extracted/webapp
+
+      - name: Verify staging health endpoint
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $healthUrl = "https://${{ env.AZURE_WEBAPP_NAME }}-${{ env.AZURE_STAGING_SLOT }}.azurewebsites.net/health"
+          $maxAttempts = 20
+          $delaySeconds = 15
+
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -Uri $healthUrl -Method Get -TimeoutSec 20 -UseBasicParsing
+              if ($response.StatusCode -eq 200) {
+                Write-Host "Staging health check succeeded on attempt $attempt."
+                exit 0
+              }
+              Write-Host "Attempt $attempt returned HTTP $($response.StatusCode)."
+            } catch {
+              Write-Host "Attempt $attempt failed: $($_.Exception.Message)"
+            }
+
+            if ($attempt -lt $maxAttempts) {
+              Start-Sleep -Seconds $delaySeconds
+            }
+          }
+
+          Write-Error "Staging slot failed health checks at $healthUrl after $maxAttempts attempts."
+          exit 1
+
+      - name: Resolve resource group for app service
+        id: resolve-rg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $resourceGroup = az resource list --name "${{ env.AZURE_WEBAPP_NAME }}" --resource-type "Microsoft.Web/sites" --query "[0].resourceGroup" -o tsv
+          if ([string]::IsNullOrWhiteSpace($resourceGroup)) {
+            Write-Error "Unable to resolve resource group for app '${{ env.AZURE_WEBAPP_NAME }}'."
+            exit 1
+          }
+
+          "resource_group=$resourceGroup" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Resolved resource group: $resourceGroup"
+
+      - name: Swap staging slot into production
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          az webapp deployment slot swap `
+            --name "${{ env.AZURE_WEBAPP_NAME }}" `
+            --resource-group "${{ steps.resolve-rg.outputs.resource_group }}" `
+            --slot "${{ env.AZURE_STAGING_SLOT }}" `
+            --target-slot "${{ env.AZURE_PRODUCTION_SLOT }}"
