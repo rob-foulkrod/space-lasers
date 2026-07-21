@@ -24,8 +24,8 @@ See the supporting docs in [docs/README.md](docs/README.md).
 - .NET 10
 - ASP.NET Core Razor Pages
 - xUnit
-- Coverlet (Cobertura output + minimum line coverage threshold)
-- Azure Bicep (App Service plan + Linux web app)
+- Coverlet 
+- Azure Bicep (App Service plan + windows web app)
 
 ## Prerequisites
 
