@@ -7,6 +7,10 @@ updates:
       day: "monday"
       time: "07:00"
       timezone: "UTC"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
