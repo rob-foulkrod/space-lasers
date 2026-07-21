@@ -117,7 +117,20 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $healthUrl = "https://${{ env.AZURE_WEBAPP_NAME }}-${{ env.AZURE_STAGING_SLOT }}.azurewebsites.net/health"
+          $resourceGroup = az resource list --name "${{ env.AZURE_WEBAPP_NAME }}" --resource-type "Microsoft.Web/sites" --query "[0].resourceGroup" -o tsv
+          if ([string]::IsNullOrWhiteSpace($resourceGroup)) {
+            Write-Error "Unable to resolve resource group for app '${{ env.AZURE_WEBAPP_NAME }}'."
+            exit 1
+          }
+
+          $slotHostName = az webapp show --name "${{ env.AZURE_WEBAPP_NAME }}" --resource-group "$resourceGroup" --slot "${{ env.AZURE_STAGING_SLOT }}" --query "defaultHostName" -o tsv
+          if ([string]::IsNullOrWhiteSpace($slotHostName)) {
+            Write-Error "Unable to resolve default hostname for slot '${{ env.AZURE_STAGING_SLOT }}'."
+            exit 1
+          }
+
+          $healthUrl = "https://$slotHostName/health"
+          Write-Host "Validating staging health at $healthUrl"
           $maxAttempts = 20
           $delaySeconds = 15
 
