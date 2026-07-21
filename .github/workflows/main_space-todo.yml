@@ -16,10 +16,10 @@ jobs:
       contents: read #This is required for actions/checkout
 
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@v4
 
       - name: Set up .NET Core
-        uses: actions/setup-dotnet@v6.0.0
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.x'
 
@@ -27,13 +27,13 @@ jobs:
         run: dotnet build src/webapp/webapp.csproj --configuration Release
 
       - name: dotnet publish
-        run: dotnet publish src/webapp/webapp.csproj -c Release -o "${{env.DOTNET_ROOT}}/myapp"
+        run: dotnet publish src/webapp/webapp.csproj -c Release -o "${{ github.workspace }}/artifacts/myapp"
 
       - name: Upload artifact for deployment job
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v4
         with:
           name: .net-app
-          path: ${{env.DOTNET_ROOT}}/myapp
+          path: ${{ github.workspace }}/artifacts/myapp
 
   deploy:
     runs-on: windows-latest
@@ -44,12 +44,12 @@ jobs:
 
     steps:
       - name: Download artifact from build job
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v4
         with:
           name: .net-app
       
       - name: Login to Azure
-        uses: azure/login@v3.0.0
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_AC3FEC5F61884E499A0E04E8E6B0A262 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_7E4D4B3B3ADD44028CECB8B37F6F406E }}
@@ -57,7 +57,7 @@ jobs:
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
-        uses: azure/webapps-deploy@v3.0.8
+        uses: azure/webapps-deploy@v3
         with:
           app-name: 'space-todo'
           slot-name: 'Production'

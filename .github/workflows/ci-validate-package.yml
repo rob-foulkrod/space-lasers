@@ -1,0 +1,291 @@
+name: CI Validate and Package
+
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: 10.0.x
+  SOLUTION_FILE: space-lasers.slnx
+  WEBAPP_PROJECT: src/webapp/webapp.csproj
+  TEST_PROJECT: src/webapp.tests/webapp.tests.csproj
+  BICEP_FILE: infra/main.bicep
+  BICEP_PARAMETERS_FILE: infra/main.parameters.json
+
+jobs:
+  format:
+    name: Format and Analyzer Gate
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+
+      - name: Restore solution
+        run: dotnet restore ${{ env.SOLUTION_FILE }}
+
+      - name: Verify formatting
+        run: dotnet format ${{ env.SOLUTION_FILE }} --verify-no-changes --no-restore --verbosity normal
+
+      - name: Build with warnings as errors
+        run: dotnet build ${{ env.SOLUTION_FILE }} -c Release --no-restore -warnaserror
+
+  dependencies:
+    name: Dependency Validation
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+
+      - name: Restore solution
+        run: dotnet restore ${{ env.SOLUTION_FILE }}
+
+      - name: Validate vulnerable packages
+        shell: pwsh
+        run: |
+          $output = dotnet list ${{ env.SOLUTION_FILE }} package --vulnerable --include-transitive
+          $output
+          if ($output -match "has the following vulnerable packages") {
+            Write-Error "Vulnerable dependencies detected."
+            exit 1
+          }
+
+      - name: Dependency review for PR
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          license-check: false
+
+  test:
+    name: Test and Coverage
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+
+      - name: Restore solution
+        run: dotnet restore ${{ env.SOLUTION_FILE }}
+
+      - name: Run tests with coverage
+        run: |
+          dotnet test ${{ env.TEST_PROJECT }} -c Release --no-restore --logger "trx;LogFileName=test-results.trx" /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:Threshold=40 /p:ThresholdType=line /p:ThresholdStat=total
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_id }}
+          path: |
+            **/*.trx
+            **/coverage.cobertura.xml
+          if-no-files-found: warn
+
+  infra-validate:
+    name: Infrastructure Validation (Bicep)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Bicep and parameters
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          az bicep version
+          az bicep build --file ${{ env.BICEP_FILE }} --outdir artifacts/infra
+
+          $schema = Get-Content "${{ env.BICEP_PARAMETERS_FILE }}" -Raw | ConvertFrom-Json
+          if (-not $schema.parameters) {
+            Write-Error "Bicep parameter file is missing the parameters section."
+            exit 1
+          }
+
+      - name: Upload validated infra files
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-validated-${{ github.run_id }}
+          path: |
+            infra/main.bicep
+            infra/main.parameters.json
+            artifacts/infra/main.json
+          if-no-files-found: error
+
+  package:
+    name: Publish Deployable Artifact
+    runs-on: windows-latest
+    needs:
+      - format
+      - dependencies
+      - test
+      - infra-validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          cache: true
+
+      - name: Restore solution
+        run: dotnet restore ${{ env.SOLUTION_FILE }}
+
+      - name: Publish web app
+        run: dotnet publish ${{ env.WEBAPP_PROJECT }} -c Release --no-restore -o ${{ github.workspace }}/artifacts/webapp
+
+      - name: Download validated infra artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: infra-validated-${{ github.run_id }}
+          path: ${{ github.workspace }}/artifacts/infra-validated
+
+      - name: Stage infrastructure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path "${{ github.workspace }}/artifacts/deployable/infra" -Force | Out-Null
+          Copy-Item "${{ github.workspace }}/artifacts/infra-validated/infra/main.bicep" "${{ github.workspace }}/artifacts/deployable/infra/main.bicep" -Force
+          Copy-Item "${{ github.workspace }}/artifacts/infra-validated/infra/main.parameters.json" "${{ github.workspace }}/artifacts/deployable/infra/main.parameters.json" -Force
+          Copy-Item "${{ github.workspace }}/artifacts/infra-validated/artifacts/infra/main.json" "${{ github.workspace }}/artifacts/deployable/infra/main.json" -Force
+
+      - name: Stage web app for deployable bundle
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "${{ github.workspace }}/artifacts/deployable/webapp" -Force | Out-Null
+          Copy-Item "${{ github.workspace }}/artifacts/webapp/*" "${{ github.workspace }}/artifacts/deployable/webapp" -Recurse -Force
+
+      - name: Create zip package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ github.workspace }}/artifacts/deployable/*" -DestinationPath "${{ github.workspace }}/artifacts/webapp-deployable.zip" -Force
+
+      - name: Upload deployable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-deployable-${{ github.run_number }}
+          path: |
+            artifacts/webapp/
+            artifacts/deployable/
+            artifacts/webapp-deployable.zip
+          if-no-files-found: error
+
+  pr-commentary:
+    name: PR Approval Commentary
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: windows-latest
+    needs:
+      - format
+      - dependencies
+      - test
+      - infra-validate
+      - package
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Post CI approval summary comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- ci-approval-summary -->';
+            const statusEmoji = {
+              success: '✅',
+              failure: '❌',
+              cancelled: '⚠️',
+              skipped: '⏭️'
+            };
+
+            const results = {
+              format: '${{ needs.format.result }}',
+              dependencies: '${{ needs.dependencies.result }}',
+              test: '${{ needs.test.result }}',
+              infra: '${{ needs.infra-validate.result }}',
+              package: '${{ needs.package.result }}'
+            };
+
+            const gateFailed = Object.values(results).some((r) => r !== 'success');
+            const decision = gateFailed ? 'Changes are not approval-ready yet.' : 'All quality gates passed. PR is approval-ready from CI perspective.';
+            const headline = gateFailed ? '## ❌ CI Approval Recommendation: Hold' : '## ✅ CI Approval Recommendation: Approve';
+
+            const body = [
+              marker,
+              headline,
+              '',
+              decision,
+              '',
+              '### Gate Results',
+              `- ${statusEmoji[results.format] || '❔'} Format and Build Gate: ${results.format}`,
+              `- ${statusEmoji[results.dependencies] || '❔'} Dependency Validation: ${results.dependencies}`,
+              `- ${statusEmoji[results.test] || '❔'} Test and Coverage: ${results.test}`,
+              `- ${statusEmoji[results.infra] || '❔'} Infrastructure Validation (Bicep): ${results.infra}`,
+              `- ${statusEmoji[results.package] || '❔'} Publish Deployable Artifact: ${results.package}`,
+              '',
+              '### Reviewer Guidance',
+              '- Approve only when all gates are ✅ success.',
+              '- If any gate failed, request fixes before approval.',
+              '- Deployable artifact is available in workflow artifacts when packaging succeeds.',
+              '',
+              `Run details: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            ].join('\n');
+
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = comments.data.find(
+              (comment) => comment.user.type === 'Bot' && comment.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body
+              });
+            }
