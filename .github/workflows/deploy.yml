@@ -1,0 +1,113 @@
+name: Deploy Web App from CI Artifact
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI_WORKFLOW_FILE: ci-validate-package.yml
+  WEBAPP_ARTIFACT_PREFIX: webapp-deployable-
+  AZURE_WEBAPP_NAME: space-todo
+  AZURE_WEBAPP_SLOT: Production
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+
+    steps:
+      - name: Resolve successful CI run for this commit
+        id: resolve-ci
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflow_id = process.env.CI_WORKFLOW_FILE;
+            const head_sha = context.sha;
+
+            const maxAttempts = 40;
+            const delayMs = 30000;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id,
+                head_sha,
+                event: "push",
+                per_page: 20
+              });
+
+              const runs = data.workflow_runs || [];
+              const successful = runs.find((run) => run.status === "completed" && run.conclusion === "success");
+              if (successful) {
+                core.info(`Using CI run ${successful.id} (run_number=${successful.run_number}) for commit ${head_sha}`);
+                core.setOutput("run_id", String(successful.id));
+                core.setOutput("run_number", String(successful.run_number));
+                return;
+              }
+
+              const active = runs.find((run) => run.status === "queued" || run.status === "in_progress");
+              if (!active) {
+                const completed = runs.find((run) => run.status === "completed");
+                if (completed && completed.conclusion && completed.conclusion !== "success") {
+                  core.setFailed(`CI workflow completed for this commit but did not succeed (conclusion=${completed.conclusion}).`);
+                  return;
+                }
+              }
+
+              if (attempt < maxAttempts) {
+                core.info(`CI run for this commit is not successful yet. Waiting ${delayMs / 1000}s (attempt ${attempt}/${maxAttempts}).`);
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+              }
+            }
+
+            core.setFailed("Timed out waiting for a successful CI Validate and Package run for this commit.");
+
+      - name: Download deployable artifact from CI run
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ format('{0}{1}', env.WEBAPP_ARTIFACT_PREFIX, steps.resolve-ci.outputs.run_number) }}
+          run-id: ${{ steps.resolve-ci.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ github.workspace }}/ci-artifact
+
+      - name: Expand deployable archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipPath = Join-Path "${{ github.workspace }}" "ci-artifact/artifacts/webapp-deployable.zip"
+          if (-not (Test-Path $zipPath)) {
+            Write-Error "Expected deployable archive not found at $zipPath"
+            exit 1
+          }
+
+          $extractPath = Join-Path "${{ github.workspace }}" "ci-artifact/extracted"
+          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_AC3FEC5F61884E499A0E04E8E6B0A262 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_7E4D4B3B3ADD44028CECB8B37F6F406E }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_D8E7CB0FB9E74FBE8722FA52BF9BB54C }}
+
+      - name: Deploy web app payload to Azure Web App
+        id: deploy-to-webapp
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          slot-name: ${{ env.AZURE_WEBAPP_SLOT }}
+          package: ${{ github.workspace }}/ci-artifact/extracted/webapp
